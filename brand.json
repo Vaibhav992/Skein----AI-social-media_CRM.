@@ -1,0 +1,15 @@
+{
+  "name": "Skein",
+  "legalName": "Northloop",
+  "poweredBy": "Northloop",
+  "slug": "skein",
+  "handle": "skein",
+  "wordmark": "SKEIN",
+  "fallbackInitials": "SK",
+  "tagline": "Plan once. Publish everywhere.",
+  "description": "Skein is the social workspace for planning ideas, drafting with AI, and publishing to every channel from one calendar. A Northloop product.",
+  "inngestId": "skein-social-scheduling",
+  "storageBucket": "northloop",
+  "domain": "skein.app",
+  "themeColor": "#07080d"
+}
