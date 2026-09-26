@@ -3,7 +3,7 @@ import { getInsforgeServerClient } from "@/lib/insforge-server"
 import { cacheToolkitPage, ensureCatalogAvailable, fetchLiveToolkitsPage, listCachedToolkits } from "@/lib/composio/catalog"
 import { listUserConnectedApps } from "@/lib/composio/persist"
 import { inngest } from "@/inngest/client"
-import { getTwitterAuthConfigId } from "@/lib/composio/client"
+import { resolveTwitterAuthConfigId } from "@/lib/composio/client"
 import { composioPublicError } from "@/lib/composio/errors"
 
 export async function GET(request: NextRequest) {
@@ -16,29 +16,37 @@ export async function GET(request: NextRequest) {
     const cursor = request.nextUrl.searchParams.get("cursor") || undefined
 
     const availability = await ensureCatalogAvailable()
-    if (availability.source !== "cache") {
+    const cacheFresh = availability.source === "cache"
+    if (!cacheFresh) {
       await inngest.send({ name: "composio/refresh-catalog" }).catch(() => undefined)
     }
 
-    let page = availability.source === "cache"
+    let page = cacheFresh
       ? await listCachedToolkits({ category, search, cursor })
       : { items: [] as Awaited<ReturnType<typeof fetchLiveToolkitsPage>>["items"], nextCursor: null as string | null, total: 0 }
 
-    if (availability.source !== "cache" || page.items.length === 0) {
-      const live = await fetchLiveToolkitsPage({ category, search, cursor, limit: 40 })
-      page = {
-        items: live.items,
-        nextCursor: live.nextCursor,
-        total: live.total,
+    if (!cacheFresh) {
+      try {
+        const live = await fetchLiveToolkitsPage({ category, search, cursor, limit: 40 })
+        page = {
+          items: live.items,
+          nextCursor: live.nextCursor,
+          total: live.total,
+        }
+        await cacheToolkitPage(live.items).catch((error) => {
+          console.error("Failed to cache toolkit page", error)
+        })
+      } catch (error) {
+        const fallback = await listCachedToolkits({ category, search, cursor }).catch(() => page)
+        if (fallback.items.length === 0) throw error
+        page = fallback
+        console.error("Live Composio catalog failed; using cache", error)
       }
-      await cacheToolkitPage(live.items).catch((error) => {
-        console.error("Failed to cache toolkit page", error)
-      })
     }
 
     const connected = await listUserConnectedApps(userId)
     const connectedBySlug = new Map(connected.map((app) => [app.slug, app]))
-    const twitterReady = Boolean(getTwitterAuthConfigId())
+    const twitterReady = Boolean(await resolveTwitterAuthConfigId())
 
     return NextResponse.json({
       items: page.items.map((toolkit) => {
@@ -49,7 +57,7 @@ export async function GET(request: NextRequest) {
           status: app?.status || "disconnected",
           handle: app?.handle || null,
           connectDisabledReason: blockedTwitter
-            ? "Ask the workspace admin to add X credentials"
+            ? "Create a Twitter auth config in Composio, then refresh"
             : null,
         }
       }),

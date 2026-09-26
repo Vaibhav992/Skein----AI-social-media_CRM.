@@ -82,7 +82,7 @@ export default function RootLayout({
               <TooltipProvider>
                 {children}
               </TooltipProvider>
-              <Toaster richColors />
+              <Toaster richColors closeButton duration={4000} />
             </ThemeProvider>
           </QueryProvider>
         </ClerkProvider>

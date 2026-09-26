@@ -1,5 +1,6 @@
 import { getInsforgeAdminClient } from "@/lib/insforge-server"
 import { getComposioApiKey } from "@/lib/composio/client"
+import { composioSearchQuery, normalizeCatalogSearch } from "@/lib/composio/search"
 import type { AppAuthKind, CatalogCategory, CatalogToolkit } from "@/lib/composio/types"
 
 const COMPOSIO_API = "https://backend.composio.dev/api/v3.1"
@@ -149,6 +150,11 @@ function rowToToolkit(row: Record<string, unknown>): CatalogToolkit {
   }
 }
 
+function isComposioCursor(cursor?: string) {
+  if (!cursor || /^\d+$/.test(cursor)) return false
+  return true
+}
+
 async function composioFetch<T>(path: string, search?: Record<string, string | undefined>) {
   const url = new URL(`${COMPOSIO_API}${path}`)
   Object.entries(search || {}).forEach(([key, value]) => {
@@ -189,17 +195,29 @@ export async function fetchLiveToolkitsPage(options: {
   limit?: number
 }) {
   const limit = Math.min(options.limit ?? PAGE_SIZE, 100)
+  const search = composioSearchQuery(options.search)
   const data = await composioFetch<RestToolkitsResponse>("/toolkits", {
     category: options.category,
-    search: options.search,
+    search,
     sort_by: "usage",
     include_deprecated: "false",
     limit: String(limit),
-    cursor: options.cursor,
+    cursor: isComposioCursor(options.cursor) ? options.cursor : undefined,
   })
-  const items = (data.items || []).map((item, index) => mapRestToolkit(item, index))
+  let items = (data.items || []).map((item, index) => mapRestToolkit(item, index))
+    .filter((item) => !item.deprecated)
+
+  const localQuery = normalizeCatalogSearch(options.search).toLowerCase()
+  if (localQuery && !search) {
+    items = items.filter((item) =>
+      item.name.toLowerCase().includes(localQuery) ||
+      item.slug.toLowerCase().includes(localQuery) ||
+      (item.description || "").toLowerCase().includes(localQuery)
+    )
+  }
+
   return {
-    items: items.filter((item) => !item.deprecated),
+    items,
     nextCursor: data.next_cursor || null,
     total: data.total_items ?? items.length,
   }
@@ -356,7 +374,7 @@ export async function listCachedToolkits(options: {
     query = query.contains("category_ids", [options.category])
   }
   if (options.search) {
-    const q = options.search.replace(/[%(),]/g, "").trim()
+    const q = normalizeCatalogSearch(options.search).replace(/[%(),]/g, "").trim()
     if (q) {
       query = query.or(`name.ilike.%${q}%,slug.ilike.%${q}%,description.ilike.%${q}%`)
     }

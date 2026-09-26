@@ -1,8 +1,8 @@
 "use client"
 
-import { Suspense, useEffect, useMemo, useState } from "react"
-import { useQuery } from "@tanstack/react-query"
-import { useSearchParams } from "next/navigation"
+import { Suspense, useEffect, useMemo, useRef, useState } from "react"
+import { keepPreviousData, useQuery } from "@tanstack/react-query"
+import { useRouter, useSearchParams } from "next/navigation"
 import { Search } from "lucide-react"
 import { toast } from "sonner"
 import { BRAND_NAME } from "@/constants/brand"
@@ -13,6 +13,8 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { AppCard, AppLogo } from "@/components/apps/app-card"
 import { ApiKeyDialog } from "@/components/apps/api-key-dialog"
+import { connectCallbackNotice } from "@/lib/composio/connect-result"
+import { composioSearchQuery, matchesCatalogSearch } from "@/lib/composio/search"
 import { useConnectApp, type ConnectStartResult } from "@/lib/composio/use-connect-app"
 import type { AuthField, CatalogCategory, CatalogToolkit, ConnectedApp } from "@/lib/composio/types"
 
@@ -29,6 +31,8 @@ type ConnectedResponse = {
 
 function MarketplaceContent() {
   const searchParams = useSearchParams()
+  const router = useRouter()
+  const handledCallback = useRef<string | null>(null)
   const [mounted, setMounted] = useState(false)
   const [tab, setTab] = useState(searchParams.get("tab") === "connected" ? "connected" : "marketplace")
   const [category, setCategory] = useState(searchParams.get("category") || "")
@@ -46,58 +50,117 @@ function MarketplaceContent() {
   }, [])
 
   useEffect(() => {
-    const timer = setTimeout(() => setDebouncedQuery(query), 300)
+    const timer = setTimeout(() => setDebouncedQuery(query.trim()), 500)
     return () => clearTimeout(timer)
   }, [query])
+
+  const remoteSearch = composioSearchQuery(debouncedQuery) || ""
 
   useEffect(() => {
     const connected = searchParams.get("connected")
     const error = searchParams.get("error")
     const slug = searchParams.get("slug")
     if (!connected && !error) return
+
+    const key = `${connected}|${slug}|${error}`
+    if (handledCallback.current === key) return
+    handledCallback.current = key
+    try {
+      if (sessionStorage.getItem("skein:apps-connect-notice") === key) {
+        router.replace(searchParams.get("tab") === "connected" ? "/apps?tab=connected" : "/apps", { scroll: false })
+        return
+      }
+      sessionStorage.setItem("skein:apps-connect-notice", key)
+    } catch {
+      // ignore storage failures
+    }
+
+    const tab = searchParams.get("tab") || "marketplace"
+    router.replace(tab === "marketplace" ? "/apps" : `/apps?tab=${tab}`, { scroll: false })
+
+    const notice = connectCallbackNotice({ connected, error, slug })
+    if (notice.tone === "success") {
+      invalidate()
+      toast.success(notice.message, { id: "apps-connect-result" })
+      return
+    }
+    if (notice.tone === "info") {
+      toast.message(notice.message, { id: "apps-connect-result" })
+      return
+    }
     invalidate()
-    if (connected === "true") toast.success(`Connected ${slug || "app"}`)
-    if (connected === "false" || error) toast.error(error || `Failed to connect ${slug || "app"}`)
-  }, [searchParams, invalidate])
+    toast.error(notice.message, { id: "apps-connect-result" })
+  }, [searchParams, router, invalidate])
 
   const categoriesQuery = useQuery({
     queryKey: ["apps-categories"],
-    queryFn: async () => {
-      const res = await fetch("/api/apps/categories")
+    queryFn: async ({ signal }) => {
+      const res = await fetch("/api/apps/categories", { signal })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || "Failed to load categories")
       return data.categories as CatalogCategory[]
     },
+    staleTime: 30 * 60 * 1000,
   })
 
-  const appsQuery = useQuery({
-    queryKey: ["apps", category, debouncedQuery],
-    queryFn: async () => {
+  const catalogQuery = useQuery({
+    queryKey: ["apps", category],
+    queryFn: async ({ signal }) => {
       const params = new URLSearchParams()
       if (category) params.set("category", category)
-      if (debouncedQuery) params.set("q", debouncedQuery)
-      const res = await fetch(`/api/apps?${params.toString()}`)
+      const res = await fetch(`/api/apps?${params.toString()}`, { signal })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || "Failed to load apps")
       return data as { items: MarketplaceItem[]; nextCursor: string | null; total: number }
     },
     enabled: tab === "marketplace",
+    staleTime: 5 * 60 * 1000,
+    placeholderData: keepPreviousData,
+  })
+
+  const searchQuery = useQuery({
+    queryKey: ["apps-search", category, remoteSearch],
+    queryFn: async ({ signal }) => {
+      const params = new URLSearchParams()
+      if (category) params.set("category", category)
+      params.set("q", remoteSearch)
+      const res = await fetch(`/api/apps?${params.toString()}`, { signal })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || "Failed to load apps")
+      return data as { items: MarketplaceItem[]; nextCursor: string | null; total: number }
+    },
+    enabled: tab === "marketplace" && Boolean(remoteSearch),
+    staleTime: 5 * 60 * 1000,
+    placeholderData: keepPreviousData,
   })
 
   useEffect(() => {
     setExtraItems([])
-    setNextCursor(appsQuery.data?.nextCursor || null)
-  }, [appsQuery.data])
+  }, [category, remoteSearch])
+
+  useEffect(() => {
+    const source = remoteSearch ? searchQuery.data : catalogQuery.data
+    setNextCursor(source?.nextCursor || null)
+  }, [category, remoteSearch, catalogQuery.data, searchQuery.data])
 
   const connectedQuery = useQuery({
     queryKey: ["apps-connected"],
-    queryFn: async () => {
-      const res = await fetch("/api/apps/connected")
+    queryFn: async ({ signal }) => {
+      const res = await fetch("/api/apps/connected", { signal })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || "Failed to load connected apps")
       return data as ConnectedResponse
     },
+    staleTime: 60 * 1000,
   })
+
+  const visibleApps = useMemo(() => {
+    if (remoteSearch && searchQuery.data) {
+      return [...searchQuery.data.items, ...extraItems]
+    }
+    const loaded = [...(catalogQuery.data?.items || []), ...extraItems]
+    return loaded.filter((item) => matchesCatalogSearch(item, query))
+  }, [catalogQuery.data?.items, extraItems, query, remoteSearch, searchQuery.data])
 
   const pendingSlug = connect.connect.variables || connect.disconnect.variables || connect.connectApiKey.variables?.slug
 
@@ -205,11 +268,11 @@ function MarketplaceContent() {
           </div>
 
           <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-            {appsQuery.isPending
+            {catalogQuery.isPending
               ? Array.from({ length: 9 }).map((_, index) => (
                   <Skeleton key={index} className="h-44 rounded-[22px]" />
                 ))
-              : [...(appsQuery.data?.items || []), ...extraItems].map((app) => (
+              : visibleApps.map((app) => (
                   <AppCard
                     key={app.slug}
                     slug={app.slug}
@@ -228,11 +291,11 @@ function MarketplaceContent() {
                   />
                 ))}
           </div>
-          {appsQuery.isError || categoriesQuery.isError ? (
+          {catalogQuery.isError || categoriesQuery.isError ? (
             <p className="mt-10 text-center text-sm text-destructive">
-              {(appsQuery.error as Error)?.message || (categoriesQuery.error as Error)?.message || "Failed to load the marketplace"}
+              {(catalogQuery.error as Error)?.message || (categoriesQuery.error as Error)?.message || "Failed to load the marketplace"}
             </p>
-          ) : !appsQuery.isPending && appsQuery.data?.items.length === 0 ? (
+          ) : !catalogQuery.isPending && visibleApps.length === 0 ? (
             <p className="mt-10 text-center text-sm text-muted-foreground">
               No apps match that filter. Try another category or search.
             </p>
@@ -247,7 +310,7 @@ function MarketplaceContent() {
                   try {
                     const params = new URLSearchParams()
                     if (category) params.set("category", category)
-                    if (debouncedQuery) params.set("q", debouncedQuery)
+                    if (remoteSearch) params.set("q", remoteSearch)
                     params.set("cursor", nextCursor)
                     const res = await fetch(`/api/apps?${params.toString()}`)
                     const data = await res.json()
@@ -265,9 +328,9 @@ function MarketplaceContent() {
               </Button>
             </div>
           ) : null}
-          {appsQuery.data?.total ? (
+          {(searchQuery.data?.total ?? catalogQuery.data?.total) ? (
             <p className="mt-4 text-center text-xs text-muted-foreground">
-              Showing {(appsQuery.data.items.length + extraItems.length)} of {appsQuery.data.total}
+              Showing {visibleApps.length} of {searchQuery.data?.total ?? catalogQuery.data?.total}
             </p>
           ) : null}
         </>

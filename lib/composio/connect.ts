@@ -1,6 +1,6 @@
 import { AuthConfigTypes, AuthScheme, AuthSchemeTypes } from "@composio/core"
 import { resolveAppUrl } from "@/lib/apps/url"
-import { createUserSession, getComposio, getTwitterAuthConfigId } from "@/lib/composio/client"
+import { createUserSession, getComposio, resolveTwitterAuthConfigId } from "@/lib/composio/client"
 import { authKindFromSchemes, getCachedToolkit } from "@/lib/composio/catalog"
 import { getPlanCaps } from "@/lib/composio/entitlements"
 import { finalizeConnection } from "@/lib/composio/health"
@@ -63,9 +63,9 @@ export async function startConnect(input: {
   const slug = input.slug.trim().toLowerCase()
   if (!slug) throw new ConnectError("App slug is required")
 
-  if (slug === "twitter" && !getTwitterAuthConfigId()) {
+  if (slug === "twitter" && !(await resolveTwitterAuthConfigId())) {
     throw new ConnectError(
-      "Ask the workspace admin to add X credentials (COMPOSIO_TWITTER_AUTH_CONFIG_ID).",
+      "Twitter needs a Composio auth config. Create one for the Twitter toolkit in Composio, then refresh.",
       400
     )
   }
@@ -142,7 +142,7 @@ export async function getApiKeyFields(slug: string): Promise<AuthField[]> {
 async function resolveAuthConfigId(slug: string, scheme: string) {
   const composio = getComposio()
   if (slug === "twitter") {
-    const twitter = getTwitterAuthConfigId()
+    const twitter = await resolveTwitterAuthConfigId()
     if (twitter) return twitter
   }
 
