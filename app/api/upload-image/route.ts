@@ -30,7 +30,11 @@ export async function POST(request: Request) {
             .upload(key, file);
 
         if (error) {
-            return NextResponse.json({ error: "Failed to upload image" }, { status: 500 });
+            console.error("InsForge storage upload failed", error);
+            return NextResponse.json(
+                { error: error.message || "Failed to upload image" },
+                { status: 500 }
+            );
         }
 
         return NextResponse.json({

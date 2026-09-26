@@ -1,5 +1,6 @@
+import { brand } from "@/constants/brand"
 import { ChannelTypeEnum } from "@/constants/channels"
-import { createUserSession } from "@/lib/composio/client"
+import { createUserSession, getComposio } from "@/lib/composio/client"
 import { channelTypeToSlug } from "@/lib/composio/social"
 import { getInsforgeAdminClient } from "@/lib/insforge-server"
 import type { ImageObject } from "@/types/post.type"
@@ -59,13 +60,12 @@ export async function publishPostViaComposio(input: {
   }
 
   const session = await createUserSession(input.userId)
-  const account = { account: accountId }
 
   if (slug === "twitter") {
-    return publishTwitter(session, account, input)
+    return publishTwitter(session, input)
   }
   if (slug === "linkedin") {
-    return publishLinkedIn(session, account, input)
+    return publishLinkedIn(session, input)
   }
 
   throw new PublishError(
@@ -75,16 +75,16 @@ export async function publishPostViaComposio(input: {
 
 async function publishTwitter(
   session: { execute: ExecuteFn },
-  account: { account: string },
   input: { content: string; images?: ImageObject[]; handle?: string | null }
 ) {
   const mediaIds: string[] = []
   for (const image of input.images || []) {
+    const media = await stageImage(image, PUBLISH_TOOLS.twitter.upload, "twitter")
     const uploaded = await runTool(session, PUBLISH_TOOLS.twitter.upload, {
-      media: fileArgument(image),
+      media,
       media_category: "tweet_image",
-      media_type: guessMime(image),
-    }, account)
+      media_type: media.mimetype || guessMime(image),
+    })
     const mediaId = firstString(
       uploaded,
       ["data.id", "data.media_id", "data.data.id", "id", "media_id"]
@@ -98,7 +98,7 @@ async function publishTwitter(
   const created = await runTool(session, PUBLISH_TOOLS.twitter.create, {
     text: input.content,
     ...(mediaIds.length ? { media_media_ids: mediaIds } : {}),
-  }, account)
+  })
 
   const postId = firstString(created, ["data.id", "data.data.id", "id"])
   if (!postId) {
@@ -109,18 +109,21 @@ async function publishTwitter(
 
 async function publishLinkedIn(
   session: { execute: ExecuteFn },
-  account: { account: string },
   input: { content: string; images?: ImageObject[]; channel: PublishChannel }
 ) {
-  const author = await resolveLinkedInAuthor(session, account, input.channel)
-  const images = (input.images || []).map((image) => fileArgument(image))
+  const author = await resolveLinkedInAuthor(session, input.channel)
+  const images = await Promise.all(
+    (input.images || []).map((image) =>
+      stageImage(image, PUBLISH_TOOLS.linkedin.create, "linkedin")
+    )
+  )
   const created = await runTool(session, PUBLISH_TOOLS.linkedin.create, {
     author,
     commentary: input.content.slice(0, 3000),
     visibility: "PUBLIC",
     lifecycleState: "PUBLISHED",
     ...(images.length ? { images } : {}),
-  }, account)
+  })
 
   const restliId = firstString(created, ["id", "data.id", "data.data.id"])
   return restliId
@@ -130,7 +133,6 @@ async function publishLinkedIn(
 
 async function resolveLinkedInAuthor(
   session: { execute: ExecuteFn },
-  account: { account: string },
   channel: PublishChannel
 ) {
   const stored = channel.provider_account_id?.trim()
@@ -138,7 +140,7 @@ async function resolveLinkedInAuthor(
     return stored.startsWith("urn:") ? stored : `urn:li:person:${stored}`
   }
 
-  const me = await runTool(session, PUBLISH_TOOLS.linkedin.me, {}, account)
+  const me = await runTool(session, PUBLISH_TOOLS.linkedin.me, {})
   const personId = firstString(me, [
     "id",
     "sub",
@@ -162,17 +164,15 @@ async function resolveLinkedInAuthor(
 
 type ExecuteFn = (
   toolSlug: string,
-  arguments_?: Record<string, unknown>,
-  options?: { account?: string }
+  arguments_?: Record<string, unknown>
 ) => Promise<ExecuteResult>
 
 async function runTool(
   session: { execute: ExecuteFn },
   tool: string,
-  args: Record<string, unknown>,
-  options: { account: string }
+  args: Record<string, unknown>
 ) {
-  const result = await session.execute(tool, args, options)
+  const result = await session.execute(tool, args)
   if (result.error) {
     throw new PublishError(`${tool}: ${result.error}`)
   }
@@ -183,12 +183,41 @@ async function runTool(
   return result.data
 }
 
-function fileArgument(image: ImageObject) {
-  return {
-    name: fileName(image),
-    mimetype: guessMime(image),
-    url: image.url,
+async function stageImage(image: ImageObject, toolSlug: string, toolkitSlug: string) {
+  const composio = getComposio()
+  if (image.url?.startsWith("http")) {
+    try {
+      return await composio.files.upload({
+        file: image.url,
+        toolSlug,
+        toolkitSlug,
+      })
+    } catch (error) {
+      console.error("Composio could not fetch the image URL; uploading from storage", error)
+    }
   }
+
+  const file = await loadStorageImage(image)
+  return composio.files.upload({
+    file,
+    toolSlug,
+    toolkitSlug,
+  })
+}
+
+async function loadStorageImage(image: ImageObject) {
+  if (!image.key) {
+    throw new PublishError("Image is missing a storage key. Re-upload the image and try again.")
+  }
+
+  const admin = getInsforgeAdminClient()
+  const { data, error } = await admin.storage.from(brand.storageBucket).download(image.key)
+  if (error || !data) {
+    throw new PublishError("Could not read the image from storage. Re-upload and try again.")
+  }
+
+  const blob = data as Blob
+  return new File([blob], fileName(image), { type: blob.type || guessMime(image) })
 }
 
 function fileName(image: ImageObject) {
