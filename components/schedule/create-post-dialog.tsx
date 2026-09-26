@@ -104,7 +104,7 @@ const CreatePostDialog = ({ open, onOpenChange, selectedDate }: PropsType) => {
 
     const createPostMutation = useMutation({
         mutationFn: async ({ posts, scheduledAt, status }:
-            { posts: any[], scheduledAt: string, status?: PostStatus }) => {
+            { posts: any[], scheduledAt: string, status?: PostStatus, immediate?: boolean }) => {
             const response = await fetch("/api/post", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -120,7 +120,12 @@ const CreatePostDialog = ({ open, onOpenChange, selectedDate }: PropsType) => {
             return response.json();
         },
         onSuccess: (data, variables) => {
-            toast.success(`${data.posts.length} post(s) ${variables.status === POST_STATUS.DRAFT ? 'saved to draft' : 'scheduled'} successfully`);
+            const outcome = variables.status === POST_STATUS.DRAFT
+                ? "saved to draft"
+                : variables.immediate
+                    ? "queued to publish now"
+                    : "scheduled"
+            toast.success(`${data.posts.length} post(s) ${outcome} successfully`);
             queryClient.invalidateQueries({
                 predicate: (query) => query.queryKey[0] === "posts",
             });
@@ -250,7 +255,7 @@ const CreatePostDialog = ({ open, onOpenChange, selectedDate }: PropsType) => {
         })
     }
 
-    const handleCreatePost = (status?: PostStatus) => {
+    const handleCreatePost = (status?: PostStatus, immediate = false) => {
         if (selectedChannels.length === 0) {
             toast.error("Select at least one channel")
             return;
@@ -265,6 +270,16 @@ const CreatePostDialog = ({ open, onOpenChange, selectedDate }: PropsType) => {
         })
         if (postToCreate.some((post) => !post.content)) {
             toast.error("Each selected channel must have content")
+            return
+        }
+
+        if (immediate) {
+            createPostMutation.mutate({
+                posts: postToCreate,
+                scheduledAt: new Date().toISOString(),
+                status: POST_STATUS.QUEUE,
+                immediate: true,
+            })
             return
         }
 
@@ -306,7 +321,7 @@ const CreatePostDialog = ({ open, onOpenChange, selectedDate }: PropsType) => {
                         <div className="flex items-center justify-between gap-3">
                             <DialogTitle className="font-semibold">Create Post</DialogTitle>
                             <DialogDescription className="sr-only">
-                              Write a post, pick channels, and save it as a draft or schedule it.
+                              Write a post, pick channels, then post now, schedule it, or save a draft.
                             </DialogDescription>
                             <div className="flex items-center gap-px">
                                 {rightTabs.map((tab) => (
@@ -589,7 +604,7 @@ truncate flex-1 text-left max-w-[400px]">
                             >
                                 Cancel
                             </Button>
-                            <div className="flex items-center gap-2">
+                            <div className="flex flex-wrap items-center justify-end gap-2">
                             <Button
                                 size="lg"
                                 variant="ghost"
@@ -598,6 +613,14 @@ truncate flex-1 text-left max-w-[400px]">
                             >
                                 {createPostMutation.isPending && createPostMutation.variables.status === POST_STATUS.DRAFT && <Spinner />}
                                 Save Draft
+                            </Button>
+                            <Button
+                                size="lg"
+                                disabled={createPostMutation.isPending}
+                                onClick={() => handleCreatePost(POST_STATUS.QUEUE, true)}
+                            >
+                                {createPostMutation.isPending && createPostMutation.variables.immediate && <Spinner />}
+                                Post now
                             </Button>
                             <ButtonGroup className="p-0!">
                                 <ScheduleDatePicker
@@ -617,7 +640,7 @@ truncate flex-1 text-left max-w-[400px]">
                                             handleCreatePost()
                                         }}
                                     >
-                                        {createPostMutation.isPending && createPostMutation.variables.status === undefined && <Spinner />}
+                                        {createPostMutation.isPending && !createPostMutation.variables.immediate && createPostMutation.variables.status === undefined && <Spinner />}
                                         Schedule Post
                                     </Button>}
 

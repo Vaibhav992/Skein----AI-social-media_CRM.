@@ -69,6 +69,7 @@ export function EditPostDialog({
             scheduledAt: string,
             status?: PostStatus,
             userChannelId: string
+            immediate?: boolean
         }) => {
             const response = await fetch(`/api/post/${postId}`, {
                 method: "PATCH",
@@ -84,7 +85,7 @@ export function EditPostDialog({
             return response.json();
         },
         onSuccess: (data, variables) => {
-            toast.success(`Post ${variables.status === POST_STATUS.DRAFT ? "saved to drafts" : "rescheduled"} successfully!`);
+            toast.success(`Post ${variables.status === POST_STATUS.DRAFT ? "saved to drafts" : variables.immediate ? "queued to publish now" : "rescheduled"} successfully!`);
             queryClient.invalidateQueries({ queryKey: ["posts"] });
             onOpenChange(false);
         },
@@ -120,8 +121,26 @@ export function EditPostDialog({
     const channel = post?.channel
     const icon = channel ? getChannelIcon(channel.type) : null
 
-    const handleUpdate = (status?: PostStatus) => {
+    const handleUpdate = (status?: PostStatus, immediate = false) => {
         if (!post) return
+        if (!content.trim()) {
+            toast.error("Add some content before posting")
+            return
+        }
+
+        if (immediate) {
+            updatePostMutation.mutate({
+                postId: post.id,
+                content,
+                images,
+                scheduledAt: new Date().toISOString(),
+                status: POST_STATUS.QUEUE,
+                userChannelId: post.userChannelId,
+                immediate: true,
+            })
+            return
+        }
+
         const parsedTime = parse(time, "h:mm a", new Date())
         const finalDate = set(date || new Date(), {
             hours: parsedTime.getHours(),
@@ -260,7 +279,7 @@ export function EditPostDialog({
                     >
                         Cancel
                     </Button>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center justify-end gap-2">
                         <Button
                             variant="ghost"
                             size="lg"
@@ -269,6 +288,14 @@ export function EditPostDialog({
                         >
                             {updatePostMutation.isPending && updatePostMutation.variables?.status === POST_STATUS.DRAFT && <Spinner />}
                             Save Draft
+                        </Button>
+                        <Button
+                            size="lg"
+                            onClick={() => handleUpdate(POST_STATUS.QUEUE, true)}
+                            disabled={updatePostMutation.isPending}
+                        >
+                            {updatePostMutation.isPending && updatePostMutation.variables?.immediate && <Spinner />}
+                            Post now
                         </Button>
                         <ButtonGroup className="p-0!">
                             <ScheduleDatePicker
@@ -285,7 +312,7 @@ export function EditPostDialog({
                                     }}
                                     disabled={updatePostMutation.isPending || !date || !time || isTimeNotAvailable || isDatePassed}
                                 >
-                                    {updatePostMutation.isPending && updatePostMutation.variables?.status === undefined && <Spinner />}
+                                    {updatePostMutation.isPending && !updatePostMutation.variables?.immediate && updatePostMutation.variables?.status === undefined && <Spinner />}
                                     Schedule Post
                                 </Button>}
                             />
